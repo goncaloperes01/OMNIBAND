@@ -10,8 +10,8 @@
 #define MIC_ANALOG_PIN 36
 #define MIC_DIGITAL_PIN 26
 
-const char* WIFI_SSID = "TEU_WIFI";
-const char* WIFI_PASS = "TUA_PASSWORD";
+const char* WIFI_SSID = "omnitest";
+const char* WIFI_PASS = "omniband";
 
 const char* MQTT_BROKER = "broker.hivemq.com";
 const int   MQTT_PORT   = 1883;
