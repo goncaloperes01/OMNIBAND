@@ -200,7 +200,7 @@ MicStats sampleMic(unsigned long durationMs = 100) {
   stats.average = samples > 0 ? sum / samples : 0;
   stats.digitalRaw = lastDigitalRaw;
   stats.digitalActive = samples > 0 && digitalActiveHits > samples / 3;
-  stats.loud = stats.peakToPeak > AUDIO_PULSE_THRESHOLD || stats.digitalActive;
+  stats.loud = stats.peakToPeak > AUDIO_PULSE_THRESHOLD;
   return stats;
 }
 
