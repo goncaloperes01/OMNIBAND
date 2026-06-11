@@ -1,8 +1,8 @@
 #pragma once
 
 // Copia os mesmos valores do firmware principal quando quiseres testar WiFi/hub.
-#define WIFI_SSID ""
-#define WIFI_PASSWORD ""
+#define WIFI_SSID "CasaLt33"
+#define WIFI_PASSWORD "luisdiogo"
 #define HUB_EVENT_URL "http://192.168.1.50:8080/api/event"
 
 // Ligacoes no M5Stack CoreInk:
