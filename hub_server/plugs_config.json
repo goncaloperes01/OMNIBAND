@@ -1,0 +1,20 @@
+{
+  "_comentario": "Configuração das tomadas/lâmpadas inteligentes",
+  "_instrucoes": "Preenche com os dados da tua conta TP-Link e o IP da Tapo P110",
+  "_nota1": "Email e password são os mesmos que usas na app Tapo",
+  "_nota2": "O IP deve ser fixo (reserva DHCP no router). Descobre com: python3 -m kasa discover",
+  "_nota3": "Apenas 'corredor' tem tomada real; as restantes divisões funcionam em modo simulação",
+
+  "tp_link_credentials": {
+    "email": "PREENCHE_AQUI_O_TEU_EMAIL_TP_LINK",
+    "password": "PREENCHE_AQUI_A_TUA_PASSWORD_TP_LINK"
+  },
+
+  "plugs": {
+    "corredor": {
+      "ip": "192.168.1.100",
+      "type": "tapo_p110",
+      "name": "Tomada Corredor"
+    }
+  }
+}

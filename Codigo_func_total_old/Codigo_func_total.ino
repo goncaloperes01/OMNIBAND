@@ -1,4 +1,4 @@
-#include <M5Unified.h>
+0'#include <M5Unified.h>
 #include <Wire.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -6,7 +6,6 @@
 
 #include "BMI088.h"
 #include "config.h"
-#include "gesture_model.h"
 
 enum SystemState {
   STATE_IDLE,
@@ -41,11 +40,6 @@ struct MicStats {
   bool loud;
 };
 
-// Buffer circular para features do IMU (200 amostras × 6 canais)
-#define IMU_BUFFER_SIZE 200
-float imuBuffer[IMU_BUFFER_SIZE][6];
-int imuBufferCount = 0;
-
 BMI088 bmiDefault(BMI088_ACC_ADDRESS, BMI088_GYRO_ADDRESS);
 BMI088 bmiAlt(BMI088_ACC_ALT_ADDRESS, BMI088_GYRO_ALT_ADDRESS);
 BMI088* bmi = &bmiDefault;
@@ -64,6 +58,13 @@ bool previousLoud = false;
 MicStats lastMic = {0, 0, 0, false};
 ImuSample lastImu = {0, 0, 0, 0, 0, 0};
 
+float maxGx = 0;
+float minGx = 0;
+float maxGy = 0;
+float minGy = 0;
+float maxGz = 0;
+float minGz = 0;
+
 const unsigned long CONTEXT_WINDOW_MS = 2600;
 const unsigned long GESTURE_WINDOW_MS = 2200;
 const unsigned long IDLE_IMU_INTERVAL_MS = 80;
@@ -72,168 +73,56 @@ const unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
 
 String stateName(SystemState value) {
   switch (value) {
-    case STATE_IDLE:     return "idle";
-    case STATE_CONTEXT:  return "contexto";
-    case STATE_GESTURE:  return "gesto";
-    case STATE_SENDING:  return "envio";
-    case STATE_ERROR:    return "erro";
+    case STATE_IDLE:
+      return "idle";
+    case STATE_CONTEXT:
+      return "contexto";
+    case STATE_GESTURE:
+      return "gesto";
+    case STATE_SENDING:
+      return "envio";
+    case STATE_ERROR:
+      return "erro";
   }
   return "desconhecido";
 }
 
 String actionName(GestureAction action) {
   switch (action) {
-    case ACTION_ON:      return "on";
-    case ACTION_OFF:     return "off";
-    case ACTION_DIM_UP:  return "dim_up";
-    case ACTION_DIM_DOWN: return "dim_down";
-    case ACTION_TOGGLE:  return "toggle";
-    case ACTION_NONE:    return "none";
+    case ACTION_ON:
+      return "on";
+    case ACTION_OFF:
+      return "off";
+    case ACTION_DIM_UP:
+      return "dim_up";
+    case ACTION_DIM_DOWN:
+      return "dim_down";
+    case ACTION_TOGGLE:
+      return "toggle";
+    case ACTION_NONE:
+      return "none";
   }
   return "none";
 }
 
 String roomFromPulses(int pulses) {
-  if (pulses <= 1) return "corredor";
-  if (pulses == 2) return "sala";
+  if (pulses <= 1) {
+    return "corredor";
+  }
+  if (pulses == 2) {
+    return "sala";
+  }
   return "quarto";
 }
 
 String nextRoom(String current) {
-  if (current == "corredor") return "sala";
-  if (current == "sala")     return "quarto";
+  if (current == "corredor") {
+    return "sala";
+  }
+  if (current == "sala") {
+    return "quarto";
+  }
   return "corredor";
-}
-
-// ─── FEATURE EXTRACTION (72 features: 6 canais × 12 features) ───
-void extractFeatures(float features[GESTURE_MODEL_N_FEATURES]) {
-  int n = imuBufferCount;
-  if (n == 0) {
-    memset(features, 0, sizeof(float) * GESTURE_MODEL_N_FEATURES);
-    return;
-  }
-
-  const char* names[] = {"ax", "ay", "az", "gx", "gy", "gz"};
-  int featIdx = 0;
-
-  for (int ch = 0; ch < 6; ch++) {
-    float sum = 0, sumSq = 0, maxVal = imuBuffer[0][ch], minVal = imuBuffer[0][ch];
-    
-    for (int i = 0; i < n; i++) {
-      float v = imuBuffer[i][ch];
-      sum += v;
-      sumSq += v * v;
-      if (v > maxVal) maxVal = v;
-      if (v < minVal) minVal = v;
-    }
-
-    float mean = sum / n;
-    float variance = (sumSq / n) - (mean * mean);
-    if (variance < 0) variance = 0;
-    float std = sqrtf(variance);
-    float p2p = maxVal - minVal;
-    float rms = sqrtf(sumSq / n);
-    float energy = sumSq / n;
-
-    features[featIdx++] = mean;
-    features[featIdx++] = std;
-    features[featIdx++] = maxVal;
-    features[featIdx++] = minVal;
-    features[featIdx++] = p2p;
-    features[featIdx++] = rms;
-    features[featIdx++] = energy;
-
-    // FFT simplificada (primeiros 5 bins não-DC)
-    // Usamos diferenças entre amostras como proxy espectral
-    float fft_bins[5] = {0};
-    for (int k = 1; k <= 5; k++) {
-      float real = 0, imag = 0;
-      for (int i = 0; i < n; i++) {
-        float angle = 2 * M_PI * k * i / n;
-        real += imuBuffer[i][ch] * cosf(angle);
-        imag += imuBuffer[i][ch] * -sinf(angle);
-      }
-      fft_bins[k-1] = sqrtf(real*real + imag*imag) / n;
-    }
-
-    for (int b = 0; b < 5; b++) {
-      features[featIdx++] = fft_bins[b];
-    }
-  }
-}
-
-// ─── MODEL-BASED GESTURE CLASSIFICATION ─────────────────────
-GestureAction classifyGestureML() {
-  if (imuBufferCount < 50) {
-    Serial.printf("[ML] Buffer insuficiente: %d amostras (min 50)\n", imuBufferCount);
-    return ACTION_NONE;
-  }
-
-  float features[GESTURE_MODEL_N_FEATURES];
-  extractFeatures(features);
-
-  int prediction = gesture_model_predict(features);
-
-  Serial.printf("[ML] Predição: %d -> %s (buffer=%d)\n",
-                prediction, MODEL_GESTURE_NAMES[prediction], imuBufferCount);
-
-  switch (prediction) {
-    case 1:  return ACTION_ON;
-    case 2:  return ACTION_OFF;
-    case 3:  return ACTION_DIM_UP;
-    case 4:  return ACTION_DIM_DOWN;
-    case 5:  return ACTION_TOGGLE;
-    case 0:
-    default: return ACTION_NONE;
-  }
-}
-
-// ─── THRESHOLD-BASED FALLBACK ──────────────────────────────
-void considerGesture(float value, GestureAction action, float& bestValue, GestureAction& bestAction) {
-  if (fabs(value) > fabs(bestValue)) {
-    bestValue = value;
-    bestAction = action;
-  }
-}
-
-GestureAction classifyGestureThreshold() {
-  float maxGx = 0, minGx = 0, maxGy = 0, minGy = 0, maxGz = 0, minGz = 0;
-  
-  for (int i = 0; i < imuBufferCount; i++) {
-    if (imuBuffer[i][3] > maxGx) maxGx = imuBuffer[i][3];
-    if (imuBuffer[i][3] < minGx) minGx = imuBuffer[i][3];
-    if (imuBuffer[i][4] > maxGy) maxGy = imuBuffer[i][4];
-    if (imuBuffer[i][4] < minGy) minGy = imuBuffer[i][4];
-    if (imuBuffer[i][5] > maxGz) maxGz = imuBuffer[i][5];
-    if (imuBuffer[i][5] < minGz) minGz = imuBuffer[i][5];
-  }
-
-  float bestValue = 0;
-  GestureAction bestAction = ACTION_NONE;
-
-  considerGesture(maxGz, ACTION_ON, bestValue, bestAction);
-  considerGesture(minGz, ACTION_OFF, bestValue, bestAction);
-  considerGesture(maxGy, ACTION_DIM_UP, bestValue, bestAction);
-  considerGesture(minGy, ACTION_DIM_DOWN, bestValue, bestAction);
-  considerGesture(maxGx, ACTION_TOGGLE, bestValue, bestAction);
-  considerGesture(minGx, ACTION_TOGGLE, bestValue, bestAction);
-
-  if (fabs(bestValue) < GESTURE_GYRO_THRESHOLD) {
-    return ACTION_NONE;
-  }
-  return bestAction;
-}
-
-// ─── CLASSIFY (usa ML se disponível, fallback para thresholds) ──
-GestureAction classifyGesture() {
-#if USE_ML_MODEL
-  GestureAction mlResult = classifyGestureML();
-  if (mlResult != ACTION_NONE) {
-    return mlResult;
-  }
-  Serial.println("[ML] Modelo retornou idle, a usar fallback thresholds");
-#endif
-  return classifyGestureThreshold();
 }
 
 void drawStatus(const String& line1 = "", const String& line2 = "") {
@@ -250,9 +139,6 @@ void drawStatus(const String& line1 = "", const String& line2 = "") {
   M5.Display.printf("IMU: %s\n", imuOK ? "OK" : "N/D");
   M5.Display.printf("WiFi: %s\n", WiFi.status() == WL_CONNECTED ? "OK" : "OFF");
   M5.Display.printf("Mic p2p: %d\n", lastMic.peakToPeak);
-#if USE_ML_MODEL
-  M5.Display.printf("ML: %s\n", imuBufferCount >= 50 ? "ON" : "buf<50");
-#endif
 
   if (line1.length() > 0) {
     M5.Display.setCursor(8, 126);
@@ -278,16 +164,22 @@ void enterState(SystemState next, const String& line1 = "", const String& line2 
 
   if (state == STATE_GESTURE) {
     pendingAction = ACTION_NONE;
-    imuBufferCount = 0;
+    maxGx = minGx = maxGy = minGy = maxGz = minGz = 0;
   }
 
   drawStatus(line1, line2);
 }
 
 bool connectWiFi(unsigned long timeoutMs = 3500) {
-  if (WiFi.status() == WL_CONNECTED) return true;
-  if (String(WIFI_SSID).length() == 0) return false;
-  if (millis() - lastWifiAttemptAt < WIFI_RETRY_INTERVAL_MS) return false;
+  if (WiFi.status() == WL_CONNECTED) {
+    return true;
+  }
+  if (String(WIFI_SSID).length() == 0) {
+    return false;
+  }
+  if (millis() - lastWifiAttemptAt < WIFI_RETRY_INTERVAL_MS) {
+    return false;
+  }
 
   lastWifiAttemptAt = millis();
   WiFi.mode(WIFI_STA);
@@ -323,14 +215,20 @@ bool probeImuWithPins(uint8_t sda, uint8_t scl) {
 }
 
 bool initImu() {
-  if (probeImuWithPins(I2C_PRIMARY_SDA, I2C_PRIMARY_SCL)) return true;
-  if (probeImuWithPins(I2C_FALLBACK_SDA, I2C_FALLBACK_SCL)) return true;
+  if (probeImuWithPins(I2C_PRIMARY_SDA, I2C_PRIMARY_SCL)) {
+    return true;
+  }
+  if (probeImuWithPins(I2C_FALLBACK_SDA, I2C_FALLBACK_SCL)) {
+    return true;
+  }
   Serial.println("BMI088 nao encontrado");
   return false;
 }
 
 bool readImu(ImuSample& sample) {
-  if (!imuOK) return false;
+  if (!imuOK) {
+    return false;
+  }
   bmi->getAcceleration(&sample.ax, &sample.ay, &sample.az);
   bmi->getGyroscope(&sample.gx, &sample.gy, &sample.gz);
   return true;
@@ -343,9 +241,11 @@ bool isRaiseToWake(const ImuSample& sample) {
 }
 
 MicStats sampleMic(unsigned long durationMs = 80) {
-  int minValue = 4095, maxValue = 0;
+  int minValue = 4095;
+  int maxValue = 0;
   long sum = 0;
-  int samples = 0, digitalHits = 0;
+  int samples = 0;
+  int digitalHits = 0;
   unsigned long startedAt = millis();
 
   while (millis() - startedAt < durationMs) {
@@ -356,16 +256,43 @@ MicStats sampleMic(unsigned long durationMs = 80) {
     maxValue = max(maxValue, analogValue);
     sum += analogValue;
     samples++;
-    if (digitalValue == HIGH) digitalHits++;
+    if (digitalValue == HIGH) {
+      digitalHits++;
+    }
+
     delayMicroseconds(650);
   }
 
   MicStats stats;
   stats.peakToPeak = maxValue - minValue;
   stats.average = samples > 0 ? sum / samples : 0;
-  stats.digital = (samples > 0 && digitalHits > samples / 3) ? HIGH : LOW;
+  stats.digital = samples > 0 && digitalHits > samples / 3 ? HIGH : LOW;
   stats.loud = stats.peakToPeak > AUDIO_PULSE_THRESHOLD || stats.digital == HIGH;
   return stats;
+}
+
+void considerGesture(float value, GestureAction action, float& bestValue, GestureAction& bestAction) {
+  if (fabs(value) > fabs(bestValue)) {
+    bestValue = value;
+    bestAction = action;
+  }
+}
+
+GestureAction classifyGesture() {
+  float bestValue = 0;
+  GestureAction bestAction = ACTION_NONE;
+
+  considerGesture(maxGz, ACTION_ON, bestValue, bestAction);
+  considerGesture(minGz, ACTION_OFF, bestValue, bestAction);
+  considerGesture(maxGy, ACTION_DIM_UP, bestValue, bestAction);
+  considerGesture(minGy, ACTION_DIM_DOWN, bestValue, bestAction);
+  considerGesture(maxGx, ACTION_TOGGLE, bestValue, bestAction);
+  considerGesture(minGx, ACTION_TOGGLE, bestValue, bestAction);
+
+  if (fabs(bestValue) < GESTURE_GYRO_THRESHOLD) {
+    return ACTION_NONE;
+  }
+  return bestAction;
 }
 
 String commandPayload(GestureAction action) {
@@ -424,10 +351,14 @@ void handleButtons() {
 }
 
 void handleIdle() {
-  if (millis() - lastImuSampleAt < IDLE_IMU_INTERVAL_MS) return;
+  if (millis() - lastImuSampleAt < IDLE_IMU_INTERVAL_MS) {
+    return;
+  }
   lastImuSampleAt = millis();
 
-  if (!readImu(lastImu)) return;
+  if (!readImu(lastImu)) {
+    return;
+  }
 
   if (isRaiseToWake(lastImu)) {
     Serial.println("Raise-to-wake detetado");
@@ -455,16 +386,12 @@ void handleGesture() {
   if (millis() - lastImuSampleAt >= GESTURE_IMU_INTERVAL_MS) {
     lastImuSampleAt = millis();
     if (readImu(lastImu)) {
-      // Guardar no buffer circular
-      if (imuBufferCount < IMU_BUFFER_SIZE) {
-        imuBuffer[imuBufferCount][0] = lastImu.ax;
-        imuBuffer[imuBufferCount][1] = lastImu.ay;
-        imuBuffer[imuBufferCount][2] = lastImu.az;
-        imuBuffer[imuBufferCount][3] = lastImu.gx;
-        imuBuffer[imuBufferCount][4] = lastImu.gy;
-        imuBuffer[imuBufferCount][5] = lastImu.gz;
-        imuBufferCount++;
-      }
+      maxGx = max(maxGx, lastImu.gx);
+      minGx = min(minGx, lastImu.gx);
+      maxGy = max(maxGy, lastImu.gy);
+      minGy = min(minGy, lastImu.gy);
+      maxGz = max(maxGz, lastImu.gz);
+      minGz = min(minGz, lastImu.gz);
     }
   }
 
