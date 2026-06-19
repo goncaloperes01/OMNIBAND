@@ -22,6 +22,15 @@ const int MIC_NOISE_MARGIN = 220;
 const int MIC_VALID_AVG_MIN = 30; 
 const int MIC_VALID_AVG_MAX = 3900;
 
+// === DETEÇÃO ADAPTATIVA (funciona mesmo com pessoas a falar) ===
+// Em vez de um limiar fixo, o sistema mede o ruído ambiente em tempo real
+// e só conta palma quando o som está X vezes acima desse ruído.
+const float CLAP_RATIO_THRESHOLD = 2.8f;  // Palma deve ser 2.8x acima do piso de ruído
+const int   MIN_CLAP_ABSOLUTE    = 600;   // Mínimo absoluto P2P — nunca detetar abaixo disto
+const int   NOISE_FLOOR_CAP      = 900;   // Tecto máximo do piso (não adaptar até ficar surdo)
+const float NOISE_RISE_ALPHA     = 0.12f; // Rapidez com que o piso sobe (reage à conversa)
+const float NOISE_FALL_ALPHA     = 0.025f;// Rapidez com que o piso desce (retorno ao silêncio)
+
 // Tempos de amostragem contínua para apanhar bem a palma
 const unsigned long MIC_SAMPLE_MS = 40; 
 const unsigned long MIC_SAMPLE_INTERVAL_MS = 40; 
@@ -61,6 +70,10 @@ float ax0 = 0, ay0 = 0, az0 = 0;
 bool imuReady = false;
 bool micReady = false;
 int micThreshold = AUDIO_PULSE_THRESHOLD;
+
+// === ESTADO ADAPTATIVO DO MICROFONE ===
+float adaptiveNoiseFloor = 350.0f;  // Estimativa corrente do ruído P2P ambiente
+unsigned long lastPlotterAt = 0;    // Throttle do Serial Plotter
 
 unsigned long lastWakeAt = 0;
 unsigned long lastGestureAt = 0;
@@ -275,15 +288,19 @@ void calibrateMic() {
   drawBoot("Calibrar MIC", "A afinar sensor...", "A aguardar...");
   
   // Lemos o microfone apenas para saber se o cabo está bem ligado (média dos ~2000)
-  MicStats mic = sampleMic(200); 
+  // Usamos uma janela maior para melhor estimativa do ruído de fundo inicial
+  MicStats mic = sampleMic(500); 
   
-  // O GRANDE FIX: Fixamos o limite do som manualmente para 1500. 
-  // Assim, qualquer palma que passe dos 1500 é aceite logo, independentemente do ruído ao ligar a placa.
-  micThreshold = 1500; 
+  // Inicializar o piso adaptativo com o ruído medido agora (+ 20% de margem)
+  // Isto garante que o sistema começa calibrado ao ambiente atual
+  adaptiveNoiseFloor = constrain((float)mic.peakToPeak * 1.2f, 200.0f, (float)NOISE_FLOOR_CAP);
+  
+  // Calcular limiar inicial a partir do piso adaptativo
+  micThreshold = max(MIN_CLAP_ABSOLUTE, (int)(adaptiveNoiseFloor * CLAP_RATIO_THRESHOLD));
   
   micReady = mic.average >= MIC_VALID_AVG_MIN && mic.average <= MIC_VALID_AVG_MAX;
 
-  Serial.printf("[mic] avg=%d threshold_FIXO=%d ready=%d\n", mic.average, micThreshold, micReady);
+  Serial.printf("[mic] avg=%d noiseFloor=%.0f threshold=%d ready=%d\n", mic.average, adaptiveNoiseFloor, micThreshold, micReady);
 }
 
 bool connectWiFi(unsigned long timeoutMs = 12000) {
@@ -372,6 +389,16 @@ void finalizeContext() {
   drawGestureWait();
 }
 
+// Envia dados para o Serial Plotter (throttled a 50ms)
+// Mostra: P2P do mic, média do ADC E o limiar adaptativo (para ver como reage à conversa)
+void printPlotter(int p2p, int avg, int threshold) {
+  if (millis() - lastPlotterAt < 50) return;
+  lastPlotterAt = millis();
+  Serial.print("Volume_P2P:"); Serial.print(p2p);
+  Serial.print(",Media_Base:"); Serial.print(avg);
+  Serial.print(",Limiar_Adapt:"); Serial.println(threshold);
+}
+
 void processContext() {
   unsigned long now = millis();
 
@@ -396,13 +423,34 @@ void processContext() {
 
   MicStats mic = sampleMic(MIC_SAMPLE_MS);
 
-  if (mic.peakToPeak > micThreshold / 2) {
-      Serial.printf("[mic-debug] Som captado: p2p=%d (limiar=%d) avg=%d loud=%d\n", mic.peakToPeak, micThreshold, mic.average, mic.loud);
+  // === LIMIAR ADAPTATIVO ===
+  // O limiar é calculado em tempo real: 2.8x acima do piso de ruído atual,
+  // com um mínimo absoluto para evitar falsos positivos em silêncio total.
+  int dynamicThreshold = max(MIN_CLAP_ABSOLUTE, (int)(adaptiveNoiseFloor * CLAP_RATIO_THRESHOLD));
+  micThreshold = dynamicThreshold; // atualizar o display
+
+  // Enviar para o Serial Plotter (inclui o limiar para ver a adaptação)
+  printPlotter(mic.peakToPeak, mic.average, dynamicThreshold);
+
+  // Uma palma "real" é aquela que ultrapassa o limiar dinâmico (não o fixo)
+  bool isClap = mic.peakToPeak >= dynamicThreshold && !mic.suspicious;
+
+  // Atualizar o piso de ruído APENAS quando NÃO é palma
+  // → sobe rápido (para acompanhar conversa), desce devagar (retorno ao silêncio)
+  if (!isClap && !mic.suspicious) {
+    float alpha = (mic.peakToPeak > adaptiveNoiseFloor) ? NOISE_RISE_ALPHA : NOISE_FALL_ALPHA;
+    adaptiveNoiseFloor = alpha * (float)mic.peakToPeak + (1.0f - alpha) * adaptiveNoiseFloor;
+    adaptiveNoiseFloor = constrain(adaptiveNoiseFloor, 0.0f, (float)NOISE_FLOOR_CAP);
+  }
+
+  if (mic.peakToPeak > dynamicThreshold / 2) {
+      Serial.printf("[mic-debug] Som captado: p2p=%d (limiar_adapt=%d noiseFloor=%.0f) avg=%d isClap=%d\n",
+                    mic.peakToPeak, dynamicThreshold, adaptiveNoiseFloor, mic.average, isClap);
   }
 
   if (mic.suspicious) return;
 
-  if (mic.loud) {
+  if (isClap) {
     if (now - lastClapAt < CLAP_DEBOUNCE_MS) {
         Serial.println("[mic-debug] -> Ignorado: Palma demasiado rapida (Debounce)");
         return;
