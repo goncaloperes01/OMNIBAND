@@ -152,89 +152,316 @@ const char* roomFromClaps(int pulses) {
   return "quarto";
 }
 
-void drawHeader(const char* title) {
-  M5.Display.fillScreen(TFT_WHITE);
-  M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(8, 8);
-  M5.Display.println(title);
-  M5.Display.drawLine(0, 32, M5.Display.width(), 32, TFT_BLACK);
+// =====================================================================
+// UI — CoreInk (200x200, e-paper monocromático)
+// =====================================================================
+// Princípios:
+//  - epd_text para redraws completos de ecrã (boa nitidez de texto, refresh moderado)
+//  - epd_fastest + setClipRect só para o indicador "a ouvir", para não
+//    repintar o ecrã inteiro a cada tick (poupa tempo e desgaste de refresh)
+//  - Sem cor: hierarquia feita com blocos invertidos (preto/branco) e
+//    espessura de traço, nunca com tons de cinzento
+//  - Ícones desenhados com primitivas (linhas/triângulos/arcos), sem
+//    libs extra de glifos
+
+const int SCR_W = 200;
+const int SCR_H = 200;
+
+// Zona reservada ao indicador "a ouvir" (rodapé), usada para refresh parcial
+const int LISTEN_DOT_Y = 190;
+const int LISTEN_DOT_X0 = 150;
+const int LISTEN_DOT_GAP = 12;
+const int LISTEN_DOT_R = 3;
+
+bool listenIndicatorActive = false;
+unsigned long lastListenBlinkAt = 0;
+const unsigned long LISTEN_BLINK_MS = 700;
+
+void epdFullMode() {
+  M5.Display.setEpdMode(epd_text);
 }
 
-String wifiLine() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return String("WiFi OK ") + WiFi.localIP().toString();
-  }
-  return "WiFi sem ligacao";
+void epdFastMode() {
+  M5.Display.setEpdMode(epd_fastest);
 }
+
+// --- Barra de topo invertida (preto com texto branco) ---------------
+void drawTopBar(const char* leftText, const char* rightText = "") {
+  M5.Display.fillRect(0, 0, SCR_W, 22, TFT_BLACK);
+  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(6, 4);
+  M5.Display.print(leftText);
+  if (rightText[0] != '\0') {
+    M5.Display.setTextSize(1);
+    int textW = strlen(rightText) * 6;
+    M5.Display.setCursor(SCR_W - textW - 6, 7);
+    M5.Display.print(rightText);
+  }
+}
+
+void drawFooterHint(const char* text) {
+  M5.Display.drawLine(0, 178, SCR_W, 178, TFT_BLACK);
+  M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(6, 185);
+  M5.Display.print(text);
+}
+
+// --- Ícones simples desenhados por primitivas (18x18, origem em x,y) -
+void iconArrowUp(int x, int y, bool inverted) {
+  uint16_t fg = inverted ? TFT_WHITE : TFT_BLACK;
+  M5.Display.fillTriangle(x + 9, y + 2, x + 3, y + 11, x + 15, y + 11, fg);
+  M5.Display.fillRect(x + 7, y + 11, 4, 5, fg);
+}
+
+void iconArrowDown(int x, int y, bool inverted) {
+  uint16_t fg = inverted ? TFT_WHITE : TFT_BLACK;
+  M5.Display.fillTriangle(x + 9, y + 16, x + 3, y + 7, x + 15, y + 7, fg);
+  M5.Display.fillRect(x + 7, y + 2, 4, 5, fg);
+}
+
+void iconRotateOut(int x, int y, bool inverted) {
+  uint16_t fg = inverted ? TFT_WHITE : TFT_BLACK;
+  M5.Display.drawArc(x + 9, y + 9, 5, 7, 40, 320, fg);
+  M5.Display.fillTriangle(x + 16, y + 3, x + 16, y + 9, x + 10, y + 5, fg);
+}
+
+void iconRotateIn(int x, int y, bool inverted) {
+  uint16_t fg = inverted ? TFT_WHITE : TFT_BLACK;
+  M5.Display.drawArc(x + 9, y + 9, 5, 7, 220, 500, fg);
+  M5.Display.fillTriangle(x + 2, y + 3, x + 2, y + 9, x + 8, y + 5, fg);
+}
+
+void drawGestureIcon(GestureId id, int x, int y, bool inverted) {
+  M5.Display.drawRoundRect(x, y, 18, 18, 2, inverted ? TFT_WHITE : TFT_BLACK);
+  switch (id) {
+    case GESTURE_UP: iconArrowUp(x, y, inverted); break;
+    case GESTURE_DOWN: iconArrowDown(x, y, inverted); break;
+    case GESTURE_ROTATE_OUT: iconRotateOut(x, y, inverted); break;
+    case GESTURE_ROTATE_IN: iconRotateIn(x, y, inverted); break;
+    default: break;
+  }
+}
+
+// --- Linha de gesto: [icone] NOME ............. acao -----------------
+void drawGestureRow(int y, GestureId id, const char* name, const char* action, bool highlight) {
+  const int rowH = 26;
+  const int x0 = 6;
+  const int rowW = SCR_W - 12;
+
+  if (highlight) {
+    M5.Display.fillRoundRect(x0, y, rowW, rowH, 3, TFT_BLACK);
+  } else {
+    M5.Display.drawRoundRect(x0, y, rowW, rowH, 3, TFT_BLACK);
+  }
+
+  drawGestureIcon(id, x0 + 5, y + 4, highlight);
+
+  M5.Display.setTextColor(highlight ? TFT_WHITE : TFT_BLACK, highlight ? TFT_BLACK : TFT_WHITE);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(x0 + 30, y + 4);
+  M5.Display.print(name);
+  M5.Display.setCursor(x0 + 30, y + 15);
+  M5.Display.print(action);
+}
+
+// --- Indicador "a ouvir": 3 pontos, refresh PARCIAL (clipRect) -------
+int listenIndicatorPhase = 0;
+
+void resetListenIndicator() {
+  listenIndicatorActive = false;
+  listenIndicatorPhase = 0;
+  lastListenBlinkAt = 0;
+}
+
+void drawListenIndicatorFrame() {
+  // Desenhado uma vez junto do resto do ecrã (faz parte do redraw completo)
+  for (int i = 0; i < 3; i++) {
+    int cx = LISTEN_DOT_X0 + i * LISTEN_DOT_GAP;
+    M5.Display.drawCircle(cx, LISTEN_DOT_Y, LISTEN_DOT_R, TFT_BLACK);
+  }
+}
+
+// Chamado em loop(), faz só refresh parcial da zona dos pontinhos.
+// Efeito "respiração": acende 1, depois 2, depois 3 pontos, e recomeça.
+void tickListenIndicator() {
+  if (appState != STATE_GESTURE) { listenIndicatorActive = false; return; }
+  unsigned long now = millis();
+  if (listenIndicatorActive && now - lastListenBlinkAt < LISTEN_BLINK_MS) return;
+  lastListenBlinkAt = now;
+  listenIndicatorActive = true;
+
+  listenIndicatorPhase = (listenIndicatorPhase + 1) % 4;
+
+  int x0 = LISTEN_DOT_X0 - LISTEN_DOT_R - 1;
+  int w = LISTEN_DOT_GAP * 2 + LISTEN_DOT_R * 2 + 2;
+  int y0 = LISTEN_DOT_Y - LISTEN_DOT_R - 1;
+  int h = LISTEN_DOT_R * 2 + 2;
+
+  epdFastMode();
+  M5.Display.setClipRect(x0, y0, w, h);
+  M5.Display.fillRect(x0, y0, w, h, TFT_WHITE);
+  for (int i = 0; i < 3; i++) {
+    int cx = LISTEN_DOT_X0 + i * LISTEN_DOT_GAP;
+    bool filled = i < listenIndicatorPhase;
+    if (filled) M5.Display.fillCircle(cx, LISTEN_DOT_Y, LISTEN_DOT_R, TFT_BLACK);
+    else M5.Display.drawCircle(cx, LISTEN_DOT_Y, LISTEN_DOT_R, TFT_BLACK);
+  }
+  M5.Display.clearClipRect();
+  epdFullMode();
+}
+
+// --- Ecrãs principais --------------------------------------------------
 
 void drawBoot(const char* title, const char* line1 = "", const char* line2 = "") {
-  drawHeader(title);
+  epdFullMode();
+  M5.Display.fillScreen(TFT_WHITE);
+  drawTopBar(title);
+  M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(8, 48);
+  M5.Display.setCursor(8, 34);
   M5.Display.println(line1);
-  M5.Display.setCursor(8, 66);
+  M5.Display.setCursor(8, 50);
   M5.Display.println(line2);
 }
 
 void drawIdle(const char* status = "Mexe o pulso") {
-  drawHeader("OmniBand");
+  epdFullMode();
+  M5.Display.fillScreen(TFT_WHITE);
+  drawTopBar("OmniBand");
+
+  M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(8, 40); M5.Display.println(wifiLine());
-  M5.Display.setCursor(8, 56); M5.Display.print("Estado: "); M5.Display.println(status);
-  M5.Display.drawLine(0, 76, M5.Display.width(), 76, TFT_BLACK);
-  M5.Display.setCursor(8, 86); M5.Display.println("Fluxo");
-  M5.Display.setCursor(8, 104); M5.Display.println("1. Mexe o pulso");
-  M5.Display.setCursor(8, 120); M5.Display.println("2. Palmas: 1 cor, 2 sala");
-  M5.Display.setCursor(8, 136); M5.Display.println("   3 quarto");
-  M5.Display.setCursor(8, 152); M5.Display.println("3. Faz o gesto");
-  M5.Display.drawLine(0, 176, M5.Display.width(), 176, TFT_BLACK);
-  M5.Display.setCursor(8, 184); M5.Display.println("BtnA: recalibrar");
+  M5.Display.setCursor(8, 30);
+  M5.Display.print(WiFi.status() == WL_CONNECTED ? "WiFi: ligado" : "WiFi: sem ligacao");
+
+  M5.Display.setCursor(8, 44);
+  M5.Display.print("Estado: ");
+  M5.Display.print(status);
+
+  M5.Display.drawLine(0, 60, SCR_W, 60, TFT_BLACK);
+
+  M5.Display.setCursor(8, 70);
+  M5.Display.println("Como usar:");
+  M5.Display.setCursor(8, 86);  M5.Display.println("1. Mexe o pulso");
+  M5.Display.setCursor(8, 100); M5.Display.println("2. Palmas: 1=corredor");
+  M5.Display.setCursor(8, 114); M5.Display.println("   2=sala  3=quarto");
+  M5.Display.setCursor(8, 128); M5.Display.println("3. Faz o gesto");
+
+  M5.Display.drawLine(0, 145, SCR_W, 145, TFT_BLACK);
+  M5.Display.setCursor(8, 155);
+  M5.Display.println("BtnA: recalibrar sensores");
+
+  drawFooterHint("Em repouso");
 }
 
 void drawContext(const char* status, const MicStats* mic = nullptr) {
-  drawHeader("Palmas");
+  epdFullMode();
+  M5.Display.fillScreen(TFT_WHITE);
+  drawTopBar("A ouvir palmas");
+
+  M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(8, 42); M5.Display.println(status);
-  M5.Display.setCursor(8, 62); M5.Display.print("Contadas: "); M5.Display.println(clapCount);
-  M5.Display.setCursor(8, 82); M5.Display.println("1 corredor | 2 sala | 3 quarto");
-  M5.Display.drawLine(0, 108, M5.Display.width(), 108, TFT_BLACK);
-  M5.Display.setCursor(8, 118); M5.Display.print("Limiar mic: "); M5.Display.println(micThreshold);
-  if (mic != nullptr) {
-    M5.Display.setCursor(8, 136); M5.Display.print("Ultimo p2p: "); M5.Display.println(mic->peakToPeak);
-    M5.Display.setCursor(8, 154); M5.Display.print("Media ADC: "); M5.Display.println(mic->average);
-  } else {
-    M5.Display.setCursor(8, 136); M5.Display.println("A ouvir...");
+  M5.Display.setCursor(8, 30);
+  M5.Display.print(status);
+
+  // Indicador grande de progresso: 3 caixas, preenchidas conforme clapCount
+  const int boxSize = 36;
+  const int gap = 10;
+  const int totalW = boxSize * 3 + gap * 2;
+  const int startX = (SCR_W - totalW) / 2;
+  const int boxY = 50;
+  const char* labels[3] = {"cor", "sala", "qto"};
+
+  for (int i = 0; i < 3; i++) {
+    int x = startX + i * (boxSize + gap);
+    bool filled = i < clapCount;
+    if (filled) M5.Display.fillRoundRect(x, boxY, boxSize, boxSize, 4, TFT_BLACK);
+    else M5.Display.drawRoundRect(x, boxY, boxSize, boxSize, 4, TFT_BLACK);
+
+    M5.Display.setTextColor(filled ? TFT_WHITE : TFT_BLACK, filled ? TFT_BLACK : TFT_WHITE);
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(x + boxSize / 2 - 6, boxY + 8);
+    M5.Display.print(i + 1);
+    M5.Display.setTextSize(1);
+    M5.Display.setCursor(x + 4, boxY + boxSize + 4);
+    M5.Display.print(labels[i]);
   }
-  M5.Display.setCursor(8, 184); M5.Display.println("Fica quieto entre palmas");
+
+  M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+  M5.Display.setCursor(8, 110);
+  M5.Display.print("1 corredor  2 sala  3 quarto");
+
+  M5.Display.drawLine(0, 130, SCR_W, 130, TFT_BLACK);
+  M5.Display.setCursor(8, 140);
+  M5.Display.print("Limiar mic: ");
+  M5.Display.println(micThreshold);
+
+  if (mic != nullptr) {
+    M5.Display.setCursor(8, 154);
+    M5.Display.print("p2p ");
+    M5.Display.print(mic->peakToPeak);
+    M5.Display.print("  media ");
+    M5.Display.print(mic->average);
+  }
+
+  drawFooterHint("Fica quieto entre palmas");
 }
 
 void drawGestureWait() {
-  drawHeader("Gesto");
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(8, 42); M5.Display.print("Contexto: "); M5.Display.println(activeRoom);
-  M5.Display.setCursor(8, 58); M5.Display.print("Palmas: "); M5.Display.println(activeClaps);
-  M5.Display.drawLine(0, 78, M5.Display.width(), 78, TFT_BLACK);
-  M5.Display.setCursor(8, 88); M5.Display.println("^ Cima       aumentar");
-  M5.Display.setCursor(8, 104); M5.Display.println("v Baixo      diminuir");
-  M5.Display.setCursor(8, 120); M5.Display.println("> Rodar fora ligar");
-  M5.Display.setCursor(8, 136); M5.Display.println("< Rodar dentro desligar");
-  M5.Display.setCursor(8, 184); M5.Display.println("A espera do pulso...");
+  epdFullMode();
+  M5.Display.fillScreen(TFT_WHITE);
+
+  char rightLabel[24];
+  snprintf(rightLabel, sizeof(rightLabel), "%d palma%s", activeClaps, activeClaps == 1 ? "" : "s");
+  // Etiqueta do contexto em maiúsculas para destaque
+  String roomUpper = String(activeRoom);
+  roomUpper.toUpperCase();
+  drawTopBar(roomUpper.c_str(), rightLabel);
+
+  int y = 28;
+  const int rowGap = 5;
+  drawGestureRow(y, GESTURE_UP, "CIMA", "aumentar", false); y += 26 + rowGap;
+  drawGestureRow(y, GESTURE_DOWN, "BAIXO", "diminuir", false); y += 26 + rowGap;
+  drawGestureRow(y, GESTURE_ROTATE_OUT, "ROD. FORA", "ligar", false); y += 26 + rowGap;
+  drawGestureRow(y, GESTURE_ROTATE_IN, "ROD. DENTRO", "desligar", false);
+
+  drawListenIndicatorFrame();
+  resetListenIndicator();
+  drawFooterHint("A espera do gesto...");
 }
 
 void drawGestureResult(const GestureInfo& info, bool sent, int httpCode) {
-  drawHeader("Enviado");
+  epdFullMode();
+  M5.Display.fillScreen(TFT_WHITE);
+  drawTopBar(sent ? "Enviado" : "Falhou");
+
+  M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(8, 42); M5.Display.print("Contexto: "); M5.Display.println(activeRoom);
-  M5.Display.setCursor(8, 60); M5.Display.print("Gesto: "); M5.Display.println(info.title);
-  M5.Display.setCursor(8, 78); M5.Display.print("Acao: "); M5.Display.println(info.action);
-  M5.Display.drawLine(0, 106, M5.Display.width(), 106, TFT_BLACK);
-  M5.Display.setCursor(8, 118);
-  if (sent) M5.Display.println("Servidor recebeu");
+  M5.Display.setCursor(8, 30);
+  M5.Display.print("Contexto: ");
+  M5.Display.println(activeRoom);
+
+  // Bloco em destaque com o gesto reconhecido
+  M5.Display.drawRoundRect(8, 46, SCR_W - 16, 40, 4, TFT_BLACK);
+  drawGestureIcon(info.id, 16, 57, false);
+  M5.Display.setCursor(42, 56);
+  M5.Display.setTextSize(1);
+  M5.Display.print(info.title);
+  M5.Display.setCursor(42, 70);
+  M5.Display.print(info.action);
+
+  M5.Display.setCursor(8, 96);
+  if (sent) M5.Display.println("Servidor recebeu o comando");
   else if (WiFi.status() != WL_CONNECTED) M5.Display.println("Falha: WiFi desligado");
-  else M5.Display.println("Falha no POST HTTP");
-  M5.Display.setCursor(8, 138); M5.Display.print("HTTP: "); M5.Display.println(httpCode);
-  M5.Display.setCursor(8, 184); M5.Display.println("A voltar ao inicio...");
+  else M5.Display.println("Falha no envio HTTP");
+
+  M5.Display.setCursor(8, 112);
+  M5.Display.print("HTTP: ");
+  M5.Display.println(httpCode);
+
+  drawFooterHint("A voltar ao inicio...");
 }
 
 bool beginImuCandidate(uint8_t sda, uint8_t scl, Bmi088Accel& accelCandidate, Bmi088Gyro& gyroCandidate, const char* name) {
@@ -509,6 +736,8 @@ void printImuStatus(const ImuReading& r, float accelDelta, float gyroAbs) {
 void setup() {
   auto cfg = M5.config(); cfg.clear_display = true; M5.begin(cfg);
   Serial.begin(115200); delay(500); M5.Display.setRotation(0);
+  if (M5.Display.isEPD()) M5.Display.setColorDepth(8);
+  epdFullMode();
   pinMode(MIC_ANALOG_PIN, INPUT); analogReadResolution(12); analogSetPinAttenuation(MIC_ANALOG_PIN, ADC_11db);
   imuReady = initImu();
   if (!imuReady) while (true) delay(1000);
@@ -534,6 +763,9 @@ void loop() {
     case STATE_RESULT: default: break;
   }
   rememberImuReading(reading);
+
+  // UI: pisca o indicador "a ouvir" só com refresh parcial (não afeta deteção)
+  tickListenIndicator();
 
   // Amostragem dinâmica para evitar os tais pontos cegos!
   if (appState == STATE_CONTEXT) {
