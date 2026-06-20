@@ -8,7 +8,7 @@ Projeto desenvolvido no âmbito da unidade curricular **Projeto II** (2025/2026)
 
 ## 📋 Descrição
 
-O **OmniBand** é um wearable IoT de baixo consumo, assente em TinyML, pensado para automação residencial. Uma "varinha mágica" no pulso que combina **voz** (contexto) e **gesto** (ação) com processamento local, com Wi-Fi e uma app móvel para controlo rápido e intuitivo.
+O **OmniBand** é um wearable IoT de baixo consumo, assente em TinyML, pensado para automação residencial. Uma "varinha mágica" no pulso que combina **voz** (palmas para contexto) e **gesto** (ação) com processamento local, Wi-Fi e integração com Home Assistant para controlo rápido e intuitivo.
 
 ---
 
@@ -16,25 +16,28 @@ O **OmniBand** é um wearable IoT de baixo consumo, assente em TinyML, pensado p
 
 ```
 OMNIBAND/
-├── Codigo_func_total/               # Firmware PRINCIPAL do OmniBand
-│   ├── Codigo_func_total.ino        #   Máquina de estados completa
-│   └── config.h                     #   Configuração (Wi-Fi, pins, thresholds)
-│
-├── OmniBand_Diagnostico_CoreInk/    # Ferramenta de diagnóstico
+├── codigo_final.ino                     # Firmware PRINCIPAL do OmniBand (M5Stack CoreInk)
+├── Codigo_func_total_old/               # Versão anterior do firmware (legado)
+│   ├── Codigo_func_total.ino
+│   └── config.h
+├── OmniBand_Diagnostico_CoreInk/        # Ferramenta de diagnóstico do hardware
 │   ├── OmniBand_Diagnostico_CoreInk.ino
 │   └── config.h
-│
-├── hub_server/                      # SERVIDOR HUB (corre no Raspberry Pi)
-│   └── hub_server.py               #   API REST + serve App Móvel
-│
-├── app_mobile/                      # DASHBOARD MOBILE (Web App)
-│   ├── index.html                  #   Página principal
-│   ├── style.css                   #   Estilos mobile-first (dark theme)
-│   ├── app.js                      #   Lógica JS (polling + controlo)
-│   └── manifest.json              #   PWA manifest
-│
-├── codigo_teste.ino                 # Sketch de teste (MIC + IMU)
-├── testemqtt.ino                    # Sketch de teste MQTT
+├── RaspeberryPi/                        # SERVIDOR HUB (corre no Raspberry Pi)
+│   ├── app.py                           #   API REST (Flask) + Dashboard
+│   ├── smarthome.db                     #   Base de dados SQLite
+│   └── templates/
+│       └── index.html                   #   Dashboard web mobile-first
+├── Home Assistant/                      # Configuração do Home Assistant
+│   └── home-assistant/config/
+│       ├── configuration.yaml           #   Configuração principal
+│       ├── automations.yaml             #   Automações
+│       ├── scenes.yaml                  #   Cenários
+│       ├── scripts.yaml                 #   Scripts
+│       └── secrets.yaml                 #   Segredos (tokens, etc.)
+├── Funciona/                            # Binário funcional do firmware
+│   └── palmas_micro_ecra
+├── .gitignore
 └── README.md
 ```
 
@@ -44,52 +47,79 @@ OMNIBAND/
 
 ### 1️⃣ Firmware (M5StickC Plus2 / CoreInk)
 
-1. Abre `Codigo_func_total/Codigo_func_total.ino` na Arduino IDE (com suporte ESP32/M5Stack).
-2. Edita `config.h` com os dados da tua rede Wi-Fi e IP do hub:
+1. Abre `codigo_final.ino` na Arduino IDE (com suporte ESP32/M5Stack).
+2. Edita as credenciais Wi-Fi e o URL do servidor no topo do ficheiro:
    ```cpp
-   #define WIFI_SSID "tua-rede"
-   #define WIFI_PASSWORD "tua-password"
-   #define HUB_EVENT_URL "http://192.168.1.50:8080/api/event"
+   const char* WIFI_SSID = "tua-rede";
+   const char* WIFI_PASS = "tua-password";
+   const char* SERVER_URL = "http://192.168.1.233:5000/api/trigger";
    ```
 3. Compila e carrega para o dispositivo.
 
 **Fluxo de funcionamento:**
-- `IDLE` → IMU em low-power; deteta **raise-to-wake**
-- `CONTEXT` → MIC ativo durante 2.6s; conta pulsos de áudio (1=corredor, 2=sala, 3=quarto)
-- `GESTURE` → IMU amostra durante 2.2s; classifica gesto (gz=ON/OFF, gy=DIM, gx=TOGGLE)
-- `SENDING` → Envia comando HTTP POST para o hub
-- Volta a `IDLE`
+
+| Estado | Descrição |
+|--------|-----------|
+| `IDLE` | IMU em low-power; deteta **raise-to-wake** (movimento brusco do pulso) |
+| `CONTEXT` | MIC ativo; conta **palmas** para definir a divisão (1=corredor, 2=sala, 3=quarto) |
+| `GESTURE` | IMU amostra movimento; classifica gesto (Cima, Baixo, RodarFora, RodarDentro) |
+| `RESULT` | Envia comando HTTP POST para o hub e mostra feedback no ecrã |
+
+**Gestos reconhecidos:**
+
+| Gesto | Ação |
+|-------|------|
+| ⬆ Cima (aceleração z+) | Aumentar/subir (ex.: dimmer) |
+| ⬇ Baixo (aceleração z−) | Diminuir/descer (ex.: dimmer) |
+| ↻ Rodar fora (rotação +) | Ligar/acender |
+| ↺ Rodar dentro (rotação −) | Desligar/apagar |
+
+> O firmware faz auto-detecção do BMI088 (IMU) em ambas as orientações do barramento I2C e auto-calibração do microfone ao arrancar.
 
 ### 2️⃣ Hub Server (Raspberry Pi)
 
+O servidor é uma aplicação **Flask** que corre no Raspberry Pi e faz a ponte entre o wearable e o **Home Assistant**.
+
 ```bash
-cd hub_server
-python3 hub_server.py
+cd RaspeberryPi
+pip install flask requests
+python3 app.py
 ```
 
-O servidor inicia em `http://0.0.0.0:8080` e:
-- Recebe eventos do wearable via `POST /api/event`
-- Serve a App Móvel na raiz (`/`)
-- Expõe API REST para o dashboard
+O servidor inicia em `http://0.0.0.0:5000` e:
+- Recebe eventos do wearable via `POST /api/trigger`
+- Serve o Dashboard Web na raiz (`/`)
+- Expõe API REST para gestão de dispositivos e regras
+- Comunica com o Home Assistant para executar ações nos dispositivos reais
 
-**Endpoints:**
+**Endpoints da API:**
+
 | Método | Rota | Descrição |
 |--------|------|-----------|
-| POST | `/api/event` | Wearable envia comando |
-| GET | `/api/devices` | Estado de todas as divisões |
-| POST | `/api/control` | App envia comando manual |
-| GET | `/api/status` | Estado do wearable + histórico |
+| POST | `/api/trigger` | Wearable envia gesto detetado |
+| GET | `/api/devices` | Lista dispositivos registados |
+| GET | `/api/logs` | Histórico de eventos (últimos 10) |
+| POST | `/api/device/<id>/action` | Controlo manual de um dispositivo |
+| POST | `/api/ha/refresh` | Sincroniza estados com Home Assistant |
 
-### 3️⃣ App Móvel (Dashboard)
+### 3️⃣ Dashboard Web (Configuração de Regras)
 
-Acede pelo browser do telemóvel a `http://<ip-do-rpi>:8080`
+Acede pelo browser a `http://<ip-do-rpi>:5000`
 
 **Funcionalidades:**
-- **Divisões**: toggle on/off, dimmer, indicador da sala ativa
-- **Estado**: wearable online/offline, bateria, RSSI, sala ativa
-- **Controlo manual**: seleciona divisão e envia comandos
-- **Histórico**: últimos comandos executados
-- Tempo real (polling a cada 2s)
+- **Gestos**: adicionar/remover gestos reconhecidos pelo wearable
+- **Dispositivos**: registar dispositivos do Home Assistant (pelo `entity_id`)
+- **Regras**: mapear cada gesto a um dispositivo e ação (on/off/toggle)
+- **Histórico**: últimos eventos processados
+- Integração direta com Home Assistant via REST API
+
+### 4️⃣ Integração Home Assistant
+
+O hub comunica com o Home Assistant através da [REST API](https://developers.home-assistant.io/docs/api/rest/). A configuração inclui:
+
+- Ficheiros de configuração do Home Assistant em `Home Assistant/home-assistant/config/`
+- Automações em `automations.yaml`
+- Autenticação via token de acesso vitalício (configurado em `app.py`)
 
 ---
 
@@ -109,12 +139,13 @@ Acede pelo browser do telemóvel a `http://<ip-do-rpi>:8080`
 
 ## 🧰 Tecnologias
 
-- **Hardware:** M5StickC Plus2 / CoreInk (ESP32), BMI088 (IMU), microfone U096
+- **Hardware:** M5Stack CoreInk (ESP32), BMI088 (IMU), microfone U096
 - **Firmware:** C++ (Arduino IDE / PlatformIO)
-- **Backend:** Python (http.server nativo)
-- **Frontend:** HTML5 + CSS3 + JavaScript (vanilla, PWA-ready)
+- **Backend:** Python (Flask), SQLite
+- **Frontend:** HTML5 + CSS3 + JavaScript (vanilla)
+- **Integração:** Home Assistant REST API
 - **Comunicação:** Wi-Fi (HTTP REST)
-- **Machine Learning:** Edge Impulse (planeado) / thresholds manuais (implementado)
+- **Machine Learning:** Deteção por thresholds (implementado), Edge Impulse (planeado)
 
 ---
 
