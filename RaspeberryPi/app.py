@@ -6,6 +6,10 @@ app = Flask(__name__)
 
 DB_NAME = "smarthome.db"
 
+# Home Assistant configuration
+HOME_ASSISTANT_URL = "http://localhost:8123"
+HOME_ASSISTANT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI2MTVhZDUwY2U4NTE0MDlmYTgyMGY4YWIzNDZlNWJhMCIsImlhdCI6MTc4MTkxNDAxOCwiZXhwIjoyMDk3Mjc0MDE4fQ.nR8wwZ8OoUV-Z_adyCOIZMDqDzQPr0r84FtCw5ptx4I"
+
 
 def get_db():
     conn = sqlite3.connect(DB_NAME)
@@ -26,12 +30,49 @@ def log_event(event_type, source, gesture_name, device_name, action, previous_st
     db.commit()
 
 
+def ha_api_call(endpoint, method="GET", data=None):
+    """Make a request to the Home Assistant REST API."""
+    url = f"{HOME_ASSISTANT_URL}{endpoint}"
+    headers = {
+        "Authorization": f"Bearer {HOME_ASSISTANT_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        if method == "GET":
+            response = requests.get(url, headers=headers, timeout=5)
+        elif method == "POST":
+            response = requests.post(url, headers=headers, json=data, timeout=5)
+        else:
+            return {"success": False, "error": f"Método HTTP não suportado: {method}"}
+
+        response.raise_for_status()
+        return {"success": True, "data": response.json()}
+
+    except requests.Timeout:
+        return {"success": False, "error": "Timeout a comunicar com o Home Assistant"}
+    except requests.HTTPError as e:
+        return {"success": False, "error": f"Erro HTTP do Home Assistant: {e.response.status_code} - {e.response.text}"}
+    except requests.ConnectionError:
+        return {"success": False, "error": "Não foi possível conectar ao Home Assistant. Verifica se está em execução."}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def get_ha_entity_state(entity_id):
+    """Get the current state of a Home Assistant entity."""
+    result = ha_api_call(f"/api/states/{entity_id}", method="GET")
+    if result["success"]:
+        return result["data"].get("state")
+    return None
+
+
 def set_device_state(device_id, action, source="manual", gesture_name=None):
     db = get_db()
 
     device = db.execute(
         '''
-        SELECT id, name, ip_address, current_state
+        SELECT id, name, entity_id, current_state
         FROM Devices
         WHERE id = ?
         ''',
@@ -42,48 +83,59 @@ def set_device_state(device_id, action, source="manual", gesture_name=None):
         return {"sucesso": False, "erro": "Dispositivo não encontrado"}
 
     current_state = device["current_state"]
+    entity_id = device["entity_id"]
 
     if action == "toggle":
-        new_state = "off" if current_state == "on" else "on"
-    elif action in ["on", "off"]:
-        new_state = action
+        # Read actual state from Home Assistant
+        ha_state = get_ha_entity_state(entity_id)
+        if ha_state is None:
+            # Fallback to local DB state
+            ha_state = current_state
+        new_state = "off" if ha_state == "on" else "on"
+        ha_action = "turn_on" if new_state == "on" else "turn_off"
+    elif action == "on":
+        new_state = "on"
+        ha_action = "turn_on"
+    elif action == "off":
+        new_state = "off"
+        ha_action = "turn_off"
     else:
         return {"sucesso": False, "erro": "Ação inválida"}
 
-    shelly_url = f"http://{device['ip_address']}/relay/0?turn={new_state}"
+    # Call Home Assistant service
+    result = ha_api_call(
+        f"/api/services/switch/{ha_action}",
+        method="POST",
+        data={"entity_id": entity_id}
+    )
 
-    try:
-        # Quando tiveres a Shelly real, descomenta:
-        # response = requests.get(shelly_url, timeout=3)
+    if not result["success"]:
+        return {"sucesso": False, "erro": result["error"]}
 
-        db.execute(
-            'UPDATE Devices SET current_state = ? WHERE id = ?',
-            (new_state, device_id)
-        )
-        db.commit()
+    # Update local database
+    db.execute(
+        'UPDATE Devices SET current_state = ? WHERE id = ?',
+        (new_state, device_id)
+    )
+    db.commit()
 
-        log_event(
-            event_type="device_action",
-            source=source,
-            gesture_name=gesture_name,
-            device_name=device["name"],
-            action=action,
-            previous_state=current_state,
-            new_state=new_state
-        )
+    log_event(
+        event_type="device_action",
+        source=source,
+        gesture_name=gesture_name,
+        device_name=device["name"],
+        action=action,
+        previous_state=current_state,
+        new_state=new_state
+    )
 
-        return {
-            "sucesso": True,
-            "device_id": device["id"],
-            "device_name": device["name"],
-            "novo_estado": new_state,
-            "url_dispositivo": shelly_url
-        }
-
-    except requests.Timeout:
-        return {"sucesso": False, "erro": "Timeout a comunicar com a tomada"}
-    except Exception as e:
-        return {"sucesso": False, "erro": str(e)}
+    return {
+        "sucesso": True,
+        "device_id": device["id"],
+        "device_name": device["name"],
+        "novo_estado": new_state,
+        "entity_id": entity_id
+    }
 
 
 @app.route('/')
@@ -147,22 +199,26 @@ def delete_gesture(gesture_id):
 @app.route('/add_device', methods=['POST'])
 def add_device():
     device_name = request.form['device_name'].strip()
-    ip_address = request.form['ip_address'].strip()
+    entity_id = request.form['entity_id'].strip()
 
-    if device_name and ip_address:
+    if device_name and entity_id:
         db = get_db()
         existing = db.execute(
-            'SELECT id FROM Devices WHERE lower(name) = lower(?) OR ip_address = ?',
-            (device_name, ip_address)
+            'SELECT id FROM Devices WHERE lower(name) = lower(?) OR entity_id = ?',
+            (device_name, entity_id)
         ).fetchone()
 
         if not existing:
+            # Optionally verify the entity exists in Home Assistant
+            ha_state = get_ha_entity_state(entity_id)
+            initial_state = ha_state if ha_state else "off"
+
             db.execute(
                 '''
-                INSERT INTO Devices (name, ip_address, current_state)
+                INSERT INTO Devices (name, entity_id, current_state)
                 VALUES (?, ?, ?)
                 ''',
-                (device_name, ip_address, 'off')
+                (device_name, entity_id, initial_state)
             )
             db.commit()
 
@@ -229,7 +285,7 @@ def api_devices():
     db = get_db()
     devices = db.execute(
         '''
-        SELECT id, name, ip_address, current_state
+        SELECT id, name, entity_id, current_state
         FROM Devices
         ORDER BY name
         '''
@@ -240,7 +296,7 @@ def api_devices():
         devices_list.append({
             "id": d["id"],
             "name": d["name"],
-            "ip_address": d["ip_address"],
+            "entity_id": d["entity_id"],
             "current_state": d["current_state"]
         })
 
@@ -340,6 +396,31 @@ def trigger_from_bracelet():
         "sucesso": True,
         "gesto": detected_gesture,
         "resultados": results
+    }), 200
+
+
+@app.route('/api/ha/refresh', methods=['POST'])
+def ha_refresh_states():
+    """Refresh all device states from Home Assistant."""
+    db = get_db()
+    devices = db.execute('SELECT id, entity_id FROM Devices').fetchall()
+
+    updated = []
+    for device in devices:
+        ha_state = get_ha_entity_state(device["entity_id"])
+        if ha_state in ("on", "off"):
+            db.execute(
+                'UPDATE Devices SET current_state = ? WHERE id = ?',
+                (ha_state, device["id"])
+            )
+            updated.append({"id": device["id"], "entity_id": device["entity_id"], "state": ha_state})
+
+    db.commit()
+
+    return jsonify({
+        "sucesso": True,
+        "dispositivos_atualizados": len(updated),
+        "dispositivos": updated
     }), 200
 
 

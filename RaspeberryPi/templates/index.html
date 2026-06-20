@@ -373,7 +373,7 @@
                 <h3>Adicionar Dispositivo</h3>
                 <form action="/add_device" method="POST" class="form-row">
                     <input type="text" name="device_name" placeholder="Nome do dispositivo" required>
-                    <input type="text" name="ip_address" placeholder="IP local" required>
+                    <input type="text" name="entity_id" placeholder="Entity ID (ex: switch.tapo_p110_sala)" required>
                     <button class="btn-primary" type="submit">Adicionar dispositivo</button>
                 </form>
             </div>
@@ -436,7 +436,7 @@
                             <div class="list-item">
                                 <div>
                                     <strong>{{ d.name }}</strong>
-                                    <div class="muted">{{ d.ip_address }}</div>
+                                    <div class="muted">{{ d.entity_id }}</div>
                                 </div>
                                 <form action="/delete_device/{{ d.id }}" method="POST" class="inline-form">
                                     <button class="btn-danger" type="submit">Apagar</button>
@@ -524,21 +524,21 @@
                 card.className = `card device-card ${statusClass}`;
                 card.style.marginBottom = '16px';
 
-                card.innerHTML = `
-                    <div class="status ${statusClass}">
-                        <span class="dot"></span>
-                        <span>${device.current_state}</span>
-                    </div>
-                    <div>
-                        <strong>${device.name}</strong>
-                        <div class="muted">IP: ${device.ip_address}</div>
-                    </div>
-                    <div style="display:flex; gap:10px; flex-wrap:wrap;">
-                        <button class="btn-success" onclick="controlDevice(${device.id}, 'on')">Ligar</button>
-                        <button class="btn-danger" onclick="controlDevice(${device.id}, 'off')">Desligar</button>
-                        <button class="btn-muted" onclick="controlDevice(${device.id}, 'toggle')">Toggle</button>
-                    </div>
-                `;
+                    card.innerHTML = `
+                        <div class="status ${statusClass}">
+                            <span class="dot"></span>
+                            <span>${device.current_state}</span>
+                        </div>
+                        <div>
+                            <strong>${device.name}</strong>
+                            <div class="muted">Entity ID: ${device.entity_id}</div>
+                        </div>
+                        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <button class="btn-success" onclick="controlDevice(${device.id}, 'on')">Ligar</button>
+                            <button class="btn-danger" onclick="controlDevice(${device.id}, 'off')">Desligar</button>
+                            <button class="btn-muted" onclick="controlDevice(${device.id}, 'toggle')">Toggle</button>
+                        </div>
+                    `;
                 container.appendChild(card);
             });
         } catch (error) {
